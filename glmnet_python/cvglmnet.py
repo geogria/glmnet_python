@@ -215,6 +215,7 @@ def cvglmnet(*, x,
              parallel = False,
              keep = False,
              grouped = True,
+             num_cores = None,
              **options):
 
     options = glmnetSet(options)
@@ -274,7 +275,8 @@ def cvglmnet(*, x,
     cpredmat = list()
     foldid = scipy.reshape(foldid, [foldid.size, ])
     if parallel == True:
-        num_cores = multiprocessing.cpu_count()
+        if num_cores is None:
+            num_cores = multiprocessing.cpu_count()
         sys.stderr.write("[status]\tParallel glmnet cv with " + str(num_cores) + " cores\n")
         cpredmat = joblib.Parallel(n_jobs=num_cores)(joblib.delayed(doCV)(i, x, y, family, foldid, nfolds, is_offset, **options) for i in range(nfolds))
     else:
