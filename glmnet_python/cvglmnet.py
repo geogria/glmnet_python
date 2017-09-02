@@ -196,6 +196,7 @@ OUTPUT ARGUMENTS:
 import sys
 import joblib
 import multiprocessing
+from multiprocessing.pool import ThreadPool
 from glmnetSet import glmnetSet
 from glmnetPredict import glmnetPredict
 import scipy
@@ -206,29 +207,29 @@ from cvmultnet import cvmultnet
 from cvmrelnet import cvmrelnet
 from cvfishnet import cvfishnet
 
+
 def cvglmnet(*, x,
              y,
-             family = 'gaussian',
-             ptype = 'default',
-             nfolds = 10,
-             foldid = scipy.empty([0]),
-             parallel = False,
-             keep = False,
-             grouped = True,
-             num_cores = None,
+             family='gaussian',
+             ptype='default',
+             nfolds=10,
+             foldid=scipy.empty([0]),
+             parallel=False,
+             keep=False,
+             grouped=True,
+             num_cores=None,
              **options):
-
     options = glmnetSet(options)
 
     if 0 < len(options['lambdau']) < 2:
         raise ValueError('Need more than one value of lambda for cv.glmnet')
-    
+
     nobs = x.shape[0]
 
     # we should not really need this. user must supply the right shape
     # if y.shape[0] != nobs:
     #    y = scipy.transpose(y)
-        
+
     # convert 1d python array of size nobs to 2d python array of size nobs x 1
     if len(y.shape) == 1:
         y = scipy.reshape(y, [y.size, 1])
@@ -236,86 +237,88 @@ def cvglmnet(*, x,
     # we should not really need this. user must supply the right shape       
     # if (len(options['offset']) > 0) and (options['offset'].shape[0] != nobs):
     #    options['offset'] = scipy.transpose(options['offset'])
-    
+
     if len(options['weights']) == 0:
-        options['weights'] = scipy.ones([nobs, 1], dtype = scipy.float64)
+        options['weights'] = scipy.ones([nobs, 1], dtype=scipy.float64)
 
     # main call to glmnet        
-    glmfit = glmnet(x = x, y = y, family = family, **options)    
+    glmfit = glmnet(x=x, y=y, family=family, **options)
 
     is_offset = glmfit['offset']
     options['lambdau'] = glmfit['lambdau']
-    
+
     nz = glmnetPredict(glmfit, scipy.empty([0]), scipy.empty([0]), 'nonzero')
-    if glmfit['class'] == 'multnet':        
+    if glmfit['class'] == 'multnet':
         nnz = scipy.zeros([len(options['lambdau']), len(nz)])
         for i in range(len(nz)):
-            nnz[:, i] = scipy.transpose(scipy.sum(nz[i], axis = 0))
-        nz = scipy.ceil(scipy.median(nnz, axis = 1))    
+            nnz[:, i] = scipy.transpose(scipy.sum(nz[i], axis=0))
+        nz = scipy.ceil(scipy.median(nnz, axis=1))
     elif glmfit['class'] == 'mrelnet':
-        nz = scipy.transpose(scipy.sum(nz[0], axis = 0))
+        nz = scipy.transpose(scipy.sum(nz[0], axis=0))
     else:
-        nz = scipy.transpose(scipy.sum(nz, axis = 0))
-    
+        nz = scipy.transpose(scipy.sum(nz, axis=0))
+
     if len(foldid) == 0:
-        ma = scipy.tile(scipy.arange(nfolds), [1, int(scipy.floor(nobs/nfolds))])
+        ma = scipy.tile(scipy.arange(nfolds), [1, int(scipy.floor(nobs / nfolds))])
         mb = scipy.arange(scipy.mod(nobs, nfolds))
         mb = scipy.reshape(mb, [1, mb.size])
-        population = scipy.append(ma, mb, axis = 1)
+        population = scipy.append(ma, mb, axis=1)
         mc = scipy.random.permutation(len(population))
         mc = mc[0:nobs]
         foldid = population[mc]
-        foldid = scipy.reshape(foldid, [foldid.size,])
+        foldid = scipy.reshape(foldid, [foldid.size, ])
     else:
         nfolds = scipy.amax(foldid) + 1
-        
+
     if nfolds < 3:
-        raise ValueError('nfolds must be bigger than 3; nfolds = 10 recommended')        
-        
+        raise ValueError('nfolds must be bigger than 3; nfolds = 10 recommended')
+
     cpredmat = list()
     foldid = scipy.reshape(foldid, [foldid.size, ])
     if parallel == True:
         if num_cores is None:
             num_cores = multiprocessing.cpu_count()
         sys.stderr.write("[status]\tParallel glmnet cv with " + str(num_cores) + " cores\n")
-        cpredmat = joblib.Parallel(n_jobs=num_cores)(joblib.delayed(doCV)(i, x, y, family, foldid, nfolds, is_offset, **options) for i in range(nfolds))
+        # cpredmat = joblib.Parallel(n_jobs=num_cores)(joblib.delayed(doCV)(i, x, y, family, foldid, nfolds, is_offset, **options) for i in range(nfolds))
+        pool = ThreadPool(num_cores)
+        cpredmat = pool.map(lambda i: doCV(i, x, y, family, foldid, nfolds, is_offset, **options), range(nfolds))
     else:
         for i in range(nfolds):
             newFit = doCV(i, x, y, family, foldid, nfolds, is_offset, **options)
             cpredmat.append(newFit)
-        
+
     if cpredmat[0]['class'] == 'elnet':
-        cvstuff = cvelnet( cpredmat, options['lambdau'], x, y \
+        cvstuff = cvelnet(cpredmat, options['lambdau'], x, y \
                           , options['weights'], options['offset'] \
                           , foldid, ptype, grouped, keep)
     elif cpredmat[0]['class'] == 'lognet':
         cvstuff = cvlognet(cpredmat, options['lambdau'], x, y \
-                          , options['weights'], options['offset'] \
-                          , foldid, ptype, grouped, keep)
-    elif cpredmat[0]['class'] == 'multnet':
-        cvstuff = cvmultnet(cpredmat, options['lambdau'], x, y \
-                          , options['weights'], options['offset'] \
-                          , foldid, ptype, grouped, keep)
-    elif cpredmat[0]['class'] == 'mrelnet':
-        cvstuff = cvmrelnet(cpredmat, options['lambdau'], x, y \
-                          , options['weights'], options['offset'] \
-                          , foldid, ptype, grouped, keep)
-    elif cpredmat[0]['class'] == 'fishnet':
-        cvstuff = cvfishnet(cpredmat, options['lambdau'], x, y \
                            , options['weights'], options['offset'] \
                            , foldid, ptype, grouped, keep)
+    elif cpredmat[0]['class'] == 'multnet':
+        cvstuff = cvmultnet(cpredmat, options['lambdau'], x, y \
+                            , options['weights'], options['offset'] \
+                            , foldid, ptype, grouped, keep)
+    elif cpredmat[0]['class'] == 'mrelnet':
+        cvstuff = cvmrelnet(cpredmat, options['lambdau'], x, y \
+                            , options['weights'], options['offset'] \
+                            , foldid, ptype, grouped, keep)
+    elif cpredmat[0]['class'] == 'fishnet':
+        cvstuff = cvfishnet(cpredmat, options['lambdau'], x, y \
+                            , options['weights'], options['offset'] \
+                            , foldid, ptype, grouped, keep)
     elif cpredmat[0]['class'] == 'coxnet':
         raise NotImplementedError('Cross-validation for coxnet not implemented yet.')
-        #cvstuff = cvcoxnet(cpredmat, options['lambdau'], x, y \
+        # cvstuff = cvcoxnet(cpredmat, options['lambdau'], x, y \
         #                  , options['weights'], options['offset'] \
         #                  , foldid, ptype, grouped, keep)
- 
+
     cvm = cvstuff['cvm']
     cvsd = cvstuff['cvsd']
     cvname = cvstuff['name']
 
     CVerr = dict()
-    CVerr['lambdau'] = options['lambdau']       
+    CVerr['lambdau'] = options['lambdau']
     CVerr['cvm'] = scipy.transpose(cvm)
     CVerr['cvsd'] = scipy.transpose(cvsd)
     CVerr['cvup'] = scipy.transpose(cvm + cvsd)
@@ -328,26 +331,26 @@ def cvglmnet(*, x,
         CVerr['foldid'] = foldid
     if ptype == 'auc':
         cvm = -cvm
-    CVerr['lambda_min'] = scipy.amax(options['lambdau'][cvm <= scipy.amin(cvm)]).reshape([1])  
+    CVerr['lambda_min'] = scipy.amax(options['lambdau'][cvm <= scipy.amin(cvm)]).reshape([1])
     idmin = options['lambdau'] == CVerr['lambda_min']
     semin = cvm[idmin] + cvsd[idmin]
     CVerr['lambda_1se'] = scipy.amax(options['lambdau'][cvm <= semin]).reshape([1])
     CVerr['class'] = 'cvglmnet'
-    
-    return(CVerr)
-        
+
+    return (CVerr)
+
+
 # end of cvglmnet
-#==========================
+# ==========================
 def doCV(i, x, y, family, foldid, nfolds, is_offset, **options):
     which = foldid == i
     opts = options.copy()
-    opts['weights'] = opts['weights'][~which, ]
+    opts['weights'] = opts['weights'][~which,]
     opts['lambdau'] = options['lambdau']
     if is_offset:
         if opts['offset'].size > 0:
-            opts['offset'] = opts['offset'][~which, ]
-    xr = x[~which, ]
-    yr = y[~which, ]
-    newFit = glmnet(x = xr, y = yr, family = family, **opts)    
-    return(newFit)
-    
+            opts['offset'] = opts['offset'][~which,]
+    xr = x[~which,]
+    yr = y[~which,]
+    newFit = glmnet(x=xr, y=yr, family=family, **opts)
+    return (newFit)
